@@ -10,7 +10,7 @@ fun writeOsm(nodes: List<OsmNode>, file: File) {
     XMLOutputFactory.newFactory().createXMLStreamWriter(bos).write {
         element("osm") {
             attr("version", "0.6")
-            attr("generator", "hh-import-trees")
+            attr("generator", "ms-import-trees")
             writeCharacters("\n")
             for (node in nodes) {
                 osmNode(node)
@@ -25,7 +25,7 @@ fun writeOsmChange(added: List<OsmNode>, modified: List<OsmNode>, deleted: List<
     XMLOutputFactory.newFactory().createXMLStreamWriter(bos).write {
         element("osmChange") {
             attr("version", "0.6")
-            attr("generator", "hh-import-trees")
+            attr("generator", "ms-import-trees")
             writeCharacters("\n")
             element("create") {
                 writeCharacters("\n")
@@ -64,6 +64,8 @@ private fun XMLStreamWriter.osmNode(node: OsmNode) {
         attr("lon", node.position.longitude.format(7))
         writeCharacters("\n")
         for ((key, value) in node.tags) {
+            if (key == "ref:muenster:tree") continue // skip computed id
+
             element("tag") {
                 attr("k", key)
                 attr("v", value)

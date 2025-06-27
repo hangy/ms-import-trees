@@ -1,161 +1,74 @@
-import org.locationtech.proj4j.CRSFactory
-import org.locationtech.proj4j.CoordinateTransformFactory
-import org.locationtech.proj4j.ProjCoordinate
+import io.github.dellisd.spatialk.geojson.FeatureCollection
+import io.github.dellisd.spatialk.geojson.Point
 import java.io.InputStream
-import javax.xml.stream.XMLInputFactory
-import javax.xml.stream.events.XMLEvent
 import kotlin.collections.ArrayList
-import kotlin.collections.HashMap
 
-private data class KatasterTree(
-    val tags: Map<String, String>,
-    val isHPA: Boolean
-)
+const val regionalschluessel = "055150000000" // Münster
 
-fun parseKataster(inputStream: InputStream, importTimeStamp: String?): List<OsmNode> {
-    val reader = XMLInputFactory.newDefaultFactory().createXMLStreamReader(inputStream)
-    val trees = ArrayList<KatasterTree>()
-    var tree: MutableMap<String, String>? = null
-    val elements = ArrayList<String>()
-    val crsFactory = CRSFactory()
-    var publicationTimeStamp: String? = null
-    var isHPA = false
-    val transform = CoordinateTransformFactory().createTransform(
-        crsFactory.createFromName("epsg:25832"),
-        crsFactory.createFromName("epsg:4326")
-    )
-    while (reader.hasNext()) {
-        when (reader.next()) {
-            XMLEvent.START_ELEMENT -> {
-                val name = reader.name.localPart
-                when (name) {
-                    "strassenbaumkataster" -> isHPA = false
-                    "strassenbaumkataster_hpa" -> isHPA = true
-                    "FeatureCollection" -> publicationTimeStamp = reader.attributes["timeStamp"]!!
-                    "featureMember" -> tree = HashMap()
-                    // check if points are in expected coordinate system
-                    "Point" -> check(reader.attributes["srsName"] == "EPSG:25832")
-                }
-                elements.add(name)
-            }
-            XMLEvent.END_ELEMENT -> {
-                val name = reader.name.localPart
-                if (name == "featureMember") {
-                    trees.add(KatasterTree(tree!!, isHPA))
-                    tree = null
-                }
-                elements.removeLast()
-            }
-            XMLEvent.CHARACTERS -> {
-                val value = reader.text.trim()
-                val key = elements.last()
-                if (tree == null) continue
-                // transform epsg:25832 to epsg:4326 coordinates
-                if (key == "pos") {
-                    val posStr = value.split(' ', ignoreCase = false, limit = 2)
-                    val x = posStr[0].toDouble()
-                    val y = posStr[1].toDouble()
-                    val result = ProjCoordinate()
-                    transform.transform(ProjCoordinate(x, y), result)
+private data class KatasterTree(val tags: Map<String, String>, val isHPA: Boolean)
 
-                    tree["lat"] = result.y.toString()
-                    tree["lon"] = result.x.toString()
-                } else {
-                    tree[key] = value
-                }
-            }
+fun parseKataster(inputStream: InputStream, dataTimeStamp: String): List<OsmNode> {
+    val features =
+            FeatureCollection.fromJson(json = inputStream.bufferedReader().use { it.readText() })
+
+    val trees = ArrayList<OsmNode>()
+
+    for (feature in features.features) {
+        if (feature.geometry == null || feature.geometry !is Point) {
+            continue // skip features without correct geometry
         }
-    }
-    val timeStamp = importTimeStamp ?: publicationTimeStamp
 
-    return trees.mapIndexed { index, t ->
-        transformKatasterToOsm(t.tags, -(index + 1L), t.isHPA, timeStamp!!)
+        val streetKey = feature.getStringProperty("str_schl")
+        val treeType = feature.getStringProperty("baumgruppe")
+        if (streetKey == null || treeType == null) {
+            continue // skip features without str_schluessel or baumgruppe
+        }
+
+        val point = feature.geometry as Point
+        val tags =
+                hashMapOf(
+                        "natural" to "tree",
+                        "de:strassenschluessel" to "${regionalschluessel}${streetKey}"
+                )
+
+        if (treeType.length > 0) {
+            tags["species:de"] = treeType
+        }
+
+        val osm =
+                OsmNode(
+                        id = -1L,
+                        version = 1,
+                        timestamp = dataTimeStamp,
+                        position = LatLon(point.coordinates.latitude, point.coordinates.longitude),
+                        tags = tags
+                )
+
+        trees.add(osm)
     }
+
+    return trees
 }
 
-private fun transformKatasterToOsm(
-    tags: Map<String, String>,
-    id: Long,
-    isHPA: Boolean,
-    timeStamp: String
-): OsmNode {
-    val osmTags = HashMap<String, String>()
-    osmTags["natural"] = "tree"
-    osmTags.putAll(tags.mapNotNull { (k, v) ->
-        when (k) {
-            "baumid" -> (if (isHPA) "ref:hpa" else "ref:bukea") to v
-            "pflanzjahr" -> {
-                // einige Bäume im Quelldatensatz haben Pflanzjahr = 0
-                val year = v.toIntOrNull()?.takeIf { it != 0 }
-                if (year != null) "start_date" to v else null
-            }
-            "kronendurchmesser" -> {
-                // einige Bäume im Quelldatensatz haben kronendurchmesser = 0
-                val diameter = v.toIntOrNull()?.takeIf { it != 0 }
-                if (diameter != null) "diameter_crown" to v else null
-            }
-            "stammumfang" -> {
-                // einige Bäume im Quelldatensatz haben stammumfang = 0
-                val circumference = v.toDoubleOrNull()?.takeIf { it != 0.0 }
-                if (circumference != null) "circumference" to (circumference / 100).format(2) else null
-            }
-            "stand_bearbeitung" -> "check_date" to v
-            "gattung_latein" -> "genus" to v
-            "gattung_deutsch" -> "genus:de" to v
-            "art_latein" -> "species" to v
-            "art_deutsch" -> "species:de" to v
-            "sorte_latein" -> "taxon" to v
-            else -> null
-        }
-    })
-
-    // wenn species gleicher Wert wie genus, entfernen:
-    // und auch wenn explizit geschrieben steht, dass die Art unbekannt ist
-    if (osmTags["species"] == osmTags["genus"] || osmTags["species"]?.endsWith(" spec.") == true) {
-        osmTags.remove("species")
-    }
-    if (osmTags["species:de"] == osmTags["genus:de"] || osmTags["species:de"]?.endsWith(" Art unbekannt") == true) {
-        osmTags.remove("species:de")
-    }
-
-    // wenn Art "f." (="Form") enthält, stattdessen in "taxon" tun
-    if (osmTags["species"]?.contains("f.") == true) {
-        osmTags["taxon"] = osmTags["species"]!!
-        osmTags.remove("species")
-    }
-
-    // wenn taxon gleicher Wert wie Species oder genus, entfernen
-    if (osmTags["taxon"] == osmTags["species"] || osmTags["taxon"] == osmTags["genus"]) {
-        osmTags.remove("taxon")
-    }
-    // taxon:cultivar aus taxon extrahieren
-    val taxon = osmTags["taxon"]
-    val taxonCultivarRegex = Regex(".*'(.+)'")
-    if (taxon != null) {
-        val match = taxonCultivarRegex.matchEntire(taxon)
-        if (match != null) {
-            osmTags["taxon:cultivar"] = match.groupValues[1]
-                // einige Kultivare sind malformed, z.B. ''New Horizon'' oder 'Autumn Blaze''
-                .replace("'","")
-            osmTags.remove("taxon")
+fun assignStableTreeIds(features: FeatureCollection) {
+    // Group features by street key
+    val grouped = features.features.groupBy { it.getStringProperty("str_schl") }
+    for ((streetKey, group) in grouped) {
+        if (streetKey == null) continue
+        // Sort by baumgruppe and then by coordinates for deterministic order
+        val sorted =
+                group.sortedWith(
+                        compareBy(
+                                { it.getStringProperty("baumgruppe") ?: "unknown" },
+                                { (it.geometry as? Point)?.coordinates?.latitude ?: 0.0 },
+                                { (it.geometry as? Point)?.coordinates?.longitude ?: 0.0 }
+                        )
+                )
+        for ((index, feature) in sorted.withIndex()) {
+            // Compose a stable string from streetKey, baumgruppe, and index
+            val treeType = feature.getStringProperty("baumgruppe") ?: "unknown"
+            val stableString = "${streetKey}_${treeType}_$index"
+            feature.setStringProperty("kataster_id", stableString)
         }
     }
-
-    // SEHR implausible Daten entfernen
-
-    val trunkCircumference = osmTags["circumference"]?.toDouble()
-    // ein Stammumfang von <10cm bei Neupflanzung ist zwar nicht unplausibel bei neu gepflanzten Bäumen, allerdings
-    // ändert sich das dann so schnell, dass diese Daten bei Veröffentlichung schon wieder veraltet sind (und normaler-
-    // weise werden als Straßenbäume bereits größere Bäume aus der Baumschule gepflanzt)
-    if (trunkCircumference != null && (trunkCircumference < 0.1 || trunkCircumference > 7.0)) {
-        osmTags.remove("circumference")
-    }
-
-    return OsmNode(
-        id = id,
-        version = 1,
-        timestamp = timeStamp,
-        position = LatLon(tags.getValue("lat").toDouble(), tags.getValue("lon").toDouble()),
-        tags = osmTags
-    )
 }

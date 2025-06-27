@@ -1,30 +1,36 @@
+import io.github.dellisd.spatialk.turf.ExperimentalTurfApi
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.net.URL
 import java.net.URLEncoder
 import java.time.Instant
-import java.time.format.DateTimeParseException
 
-// Minimale Distanz, die ein Baum aus dem Kataster zu einem Baum der bereits in OSM gemappt ist haben darf, damit der
+// Minimale Distanz, die ein Baum aus dem Kataster zu einem Baum der bereits in OSM gemappt ist
+// haben darf, damit der
 // Baum aus dem Kataster ohne Review als neuer Baum hinzugefügt werden kann.
 const val SAFE_TREE_DISTANCE = 6.5 // = ungefähr "andere Straßenseite" in Wohnstraßen
-// Maximale Distanz, die ein Baum aus dem Kataster zu einem Baum der bereits in OSM gemappt ist haben darf, damit der
-// Baum aus dem Kataster ohne Review mit diesem Baum gemergt wird. (von Mittelpunkt des Stammes zu Mittelpunkt des 
+// Maximale Distanz, die ein Baum aus dem Kataster zu einem Baum der bereits in OSM gemappt ist
+// haben darf, damit der
+// Baum aus dem Kataster ohne Review mit diesem Baum gemergt wird. (von Mittelpunkt des Stammes zu
+// Mittelpunkt des
 // Stammes)
 const val TREE_MERGE_DISTANCE = 2.5
-// Hamburg. So groß wegen Neuwerk
-val IMPORT_AREA = BoundingBox(53.3951118, 8.1044993, 54.0276500, 10.3252805)
-// Relation #62782 in OSM ist Hamburg
-const val IMPORT_AREA_RELATION = 62782L
+// Münsterland.
+val IMPORT_AREA =
+        BoundingBox(51.866528062297945, 7.333374023437501, 52.05523498618564, 7.872390747070313)
+// Relation #62591 in OSM ist Münster
+const val IMPORT_AREA_RELATION = 62591L
 
+@OptIn(io.github.dellisd.spatialk.turf.ExperimentalTurfApi::class)
 fun main(args: Array<String>) {
     val inputPath = args.getOrNull(0)
-    val oldInputPath = args.getOrNull(1)
-    val oldImportDate = args.getOrNull(2)
+    val date = args.getOrNull(1)
 
-    if (inputPath == null || (oldInputPath != null && oldImportDate == null)) {
-        println("Nutzung: hh-import-trees <aktuelles Straßenbaumkataster> [<Straßenbaumkataster des letzten Imports> <Timestamp an dem der letzte Import abgeschlossen war>]")
+    if (inputPath == null || date == null) {
+        println(
+                "Nutzung: ms-import-trees <aktuelles Straßenbaumkataster> <Aktualisierungsdatum lt. Stadt Münster>"
+        )
         return
     }
 
@@ -32,6 +38,9 @@ fun main(args: Array<String>) {
     if (!input.isFile) {
         return println("aktuelle Straßenbaumkataster-Datei existiert nicht")
     }
+
+    val x = loadKatasterTrees(input, date)
+    println(x)
 
     val outputToBeReviewed = File("$inputPath-review.osm")
     if (outputToBeReviewed.exists()) {
@@ -42,80 +51,17 @@ fun main(args: Array<String>) {
         return println("Ausgabe-Datei ${outputToBeApplied.name} existiert bereits")
     }
 
-    val oldInput: File?
-    if (oldInputPath == null) {
-        println("Importiere das gesamte Straßenbaumkataster.")
-        println("Achtung: Dies soll nur für den initialen Import genutzt werden!")
-        println()
-        oldInput = null
-    } else {
-        oldInput = File(oldInputPath)
-        if (!oldInput.isFile) {
-            return println("Straßenbaumkataster-Datei des letzten Imports existiert nicht")
-        }
-        try {
-            Instant.parse(oldImportDate!!)
-        } catch (e: DateTimeParseException) {
-            return println("Erwarte Timestamp im Format 2011-12-03T10:15:30Z")
-        }
-
-        println("Importiere was sich seit dem letzten Import des Straßenbaumkatasters geändert hat.")
-        println()
-    }
-
-    print("Lade aktuelle Straßenbaumkataster-Datei...")
-    val newKatasterTrees = loadKatasterTrees(input, null)
-    val newKatasterTreesById = newKatasterTrees.associateBy { it.katasterId!! }
-    println(" " + newKatasterTrees.size + " Bäume gelesen")
+    print("Lade aktuelle Straßenbaumkataster-Datei …")
+    val katasterTrees = loadKatasterTrees(input, date)
+    println(" " + katasterTrees.size + " Bäume gelesen")
     println()
 
-    val katasterTrees: List<OsmNode>
-    if (oldInput != null) {
-        print("Lade Straßenbaumkataster-Datei des letzten Imports...")
-        val oldKatasterTrees = loadKatasterTrees(oldInput, oldImportDate)
-        println(" " + oldKatasterTrees.size + " Bäume gelesen")
-
-        val oldKatasterTreesById = oldKatasterTrees.associateBy { it.katasterId!! }
-
-        val removedTreesCount = oldKatasterTreesById.count { it.key !in newKatasterTreesById.keys }
-        val addedTreesCount = newKatasterTreesById.count { it.key !in oldKatasterTreesById.keys }
-        println("$removedTreesCount Bäume wurden entfernt")
-        println("$addedTreesCount Bäume wurden neu gepflanzt")
-        var changedTreeCount = 0
-        var unchangedTreeCount = 0
-
-        katasterTrees = newKatasterTrees
-            .mapNotNull { katasterTree ->
-                val oldKatasterTree = oldKatasterTreesById[katasterTree.katasterId]
-
-                // ein neuer Baum
-                if (oldKatasterTree == null) {
-                    katasterTree
-                }
-                // ein Baum dessen Daten sich geändert haben (z.B. neuer Stammumfang)
-                else if (oldKatasterTree.tags != katasterTree.tags) {
-                    // wir nutzen hier das Veröffentlichungsdatum des alten Baumes weil wir ja nur wissen, dass sich
-                    // der Baum IRGENDWANN ZWISCHEN Veröffentlichungsdatum des alten und neuen Datensatzes geändert
-                    // haben muss
-                    changedTreeCount++
-                    katasterTree.copy(timestamp = oldKatasterTree.timestamp)
-                }
-                else {
-                    unchangedTreeCount++
-                    null
-                }
-            }
-
-        println("$changedTreeCount Bäume haben sich geändert")
-        println("$unchangedTreeCount Bäume bleiben unverändert")
-        println()
-    } else {
-        katasterTrees = newKatasterTrees
-    }
-
-    print("Lade Bäume aus OpenStreetMap via Overpass...")
+    print("Lade Bäume aus OpenStreetMap via Overpass …")
     val osmTrees = retrieveOsmTreesInArea(IMPORT_AREA_RELATION)
     println(" " + osmTrees.size + " Bäume gelesen")
+
+    assignStableTreeIds(katasterTrees)
+    assignStableTreeIds(osmTrees)
 
     val katasterTreesById = katasterTrees.associateBy { it.katasterId!! }
 
@@ -143,17 +89,21 @@ fun main(args: Array<String>) {
         val osmTree = osmKatasterTreesById[katasterTree.katasterId]
         // Kataster-Baum bereits in OSM-Daten vorhanden
         if (osmTree != null) {
-
-            // Die Position des Bäumes wird NICHT upgedatet: Mapper sollen die Bäume herumschieben können,
+            // Die Position des Bäumes wird NICHT upgedatet: Mapper sollen die Bäume herumschieben
+            // können,
             // die baumids (refs) der Kataster-Bäume sind nämlich stabil
-            val somethingChanged = katasterTree.tags.any { (k,v) -> osmTree.tags[k] != v }
+            val somethingChanged = katasterTree.tags.any { (k, v) -> osmTree.tags[k] != v }
             if (somethingChanged) {
                 // für diese Felder immer der autorativen Quelle vertrauen
-                val conflictingChanges = osmTree.tags
-                    .filter { (k,v) -> katasterTree.tags.containsKey(k) && katasterTree.tags[k] != v }
-                    .filterKeys { it !in listOf("circumference", "diameter_crown") }
+                val conflictingChanges =
+                        osmTree.tags
+                                .filter { (k, v) ->
+                                    katasterTree.tags.containsKey(k) && katasterTree.tags[k] != v
+                                }
+                                .filterKeys { it !in listOf("circumference", "diameter_crown") }
 
-                // nur übernehmen, wenn Datum aus Baumkataster neuer als zuletzt von Mappern bearbeitet
+                // nur übernehmen, wenn Datum aus Baumkataster neuer als zuletzt von Mappern
+                // bearbeitet
                 val osmCheckDate = osmTree.checkDateOrLastEditDate()
                 val katasterCheckDate = katasterTree.checkDateOrLastEditDate()
 
@@ -161,8 +111,7 @@ fun main(args: Array<String>) {
                     // → kann ohne Review aktualisiert werden
                     osmTree.tags.putAll(katasterTree.tags)
                     updatedTrees.add(osmTree)
-                }
-                else {
+                } else {
                     // → ansonsten, muss manuell überprüft werden
                     toBeReviewedTrees.add(katasterTree)
                     toBeReviewedBecauseChangedInOsmInTheMeantimeCount++
@@ -171,11 +120,12 @@ fun main(args: Array<String>) {
         }
         // Kataster-Baum noch nicht in OSM-Daten vorhanden
         else {
-            val nearOtherOsmTrees = osmOtherTreesRaster
-                .getAll(katasterTree.position.enclosingBoundingBox(SAFE_TREE_DISTANCE))
-                .filter { katasterTree.position.distanceTo(it) < SAFE_TREE_DISTANCE }
-                .map { osmOtherTreesByPosition[it]!! }
-                .toList()
+            val nearOtherOsmTrees =
+                    osmOtherTreesRaster
+                            .getAll(katasterTree.position.enclosingBoundingBox(SAFE_TREE_DISTANCE))
+                            .filter { katasterTree.position.distanceTo(it) < SAFE_TREE_DISTANCE }
+                            .map { osmOtherTreesByPosition[it]!! }
+                            .toList()
 
             // in OSM bisher kein Baum im Umfeld vorhanden
             if (nearOtherOsmTrees.isEmpty()) {
@@ -196,18 +146,21 @@ fun main(args: Array<String>) {
                 val katasterCheckDate = katasterTree.checkDateOrLastEditDate()
 
                 // und dieser Baum ist nah genug dran
-                // und Bearbeitungsdatum aus Baumkataster ist jünger als zuletzt von Mappern bearbeitet
-                // und Zusammenführen des Katasterbaumes mit dem OSM-Baum überschreibt keine Daten aus OSM mit anderen
+                // und Bearbeitungsdatum aus Baumkataster ist jünger als zuletzt von Mappern
+                // bearbeitet
+                // und Zusammenführen des Katasterbaumes mit dem OSM-Baum überschreibt keine Daten
+                // aus OSM mit anderen
                 //     Daten (z.B. andere Baumart)
-                if (katasterTree.position.distanceTo(nearOtherOsmTree.position) <= TREE_MERGE_DISTANCE
-                    && katasterCheckDate.isAfter(osmCheckDate)
-                    && katasterTree.tags.hasNoConflictsWith(nearOtherOsmTree.tags)
+                if (katasterTree.position.distanceTo(nearOtherOsmTree.position) <=
+                                TREE_MERGE_DISTANCE &&
+                                katasterCheckDate.isAfter(osmCheckDate) &&
+                                katasterTree.tags.hasNoConflictsWith(nearOtherOsmTree.tags)
                 ) {
                     // → Tags des Katasterbaumes ohne Review zum vorhandenen OSM Baum hinzufügen
                     nearOtherOsmTree.tags.putAll(katasterTree.tags)
                     updatedTrees.add(nearOtherOsmTree)
                 }
-                // ansonsten...
+                // ansonsten …
                 else {
                     // → Baum muss manuell reviewt werden
                     toBeReviewedTrees.add(katasterTree)
@@ -218,46 +171,52 @@ fun main(args: Array<String>) {
     }
 
     // vermutlich gefällt, jedenfalls nicht mehr im Kataster
-    val removedTrees = osmKatasterTreesById
-        // gegen Bäume in aktueller Kataster-Datei checken, nicht katasterTreesById weil dies bei
-        // jedem außer dem ersten Import ja nur die Änderungen enthält!
-        .filterKeys { it !in newKatasterTreesById.keys }
-        .map { it.value }
+    val removedTrees =
+            osmKatasterTreesById
+                    // gegen Bäume in aktueller Kataster-Datei checken, nicht katasterTreesById weil
+                    // dies bei
+                    // jedem außer dem ersten Import ja nur die Änderungen enthält! TODO: CHECK?
+                    .filterKeys { it !in katasterTreesById.keys }
+                    .map { it.value }
 
     println()
 
     if (addedTrees.isNotEmpty() || updatedTrees.isNotEmpty() || removedTrees.isNotEmpty()) {
-        println("""
-            Schreibe ${outputToBeApplied}...
-            --------------------
-            ${addedTrees.size} Straßenbäume kommen neu hinzu
-            ${updatedTrees.size} Straßenbäume wurden aktualisiert
-            ${removedTrees.size} Straßenbäume wurden entfernt
-            
-            """.trimIndent()
+        println(
+                """
+                Schreibe ${outputToBeApplied}…
+                --------------------
+                ${addedTrees.size} Straßenbäume kommen neu hinzu
+                ${updatedTrees.size} Straßenbäume wurden aktualisiert
+                ${removedTrees.size} Straßenbäume wurden entfernt
+
+                """.trimIndent()
         )
         writeOsmChange(addedTrees, updatedTrees, removedTrees, outputToBeApplied)
     }
 
     if (toBeReviewedTrees.isNotEmpty()) {
-        println("""
-            Schreibe ${outputToBeReviewed}...
-            --------------------
-            $toBeReviewedBecauseChangedInOsmInTheMeantimeCount Straßenbäume wurden zwischenzeitlich in OSM editiert und
-            $toBeReviewedBecauseCloseToOtherTreeCount neue Straßenbäume sind jeweils zwischen $TREE_MERGE_DISTANCE und $SAFE_TREE_DISTANCE Metern von einem bereits gemappten Baum entfernt.
-            ACHTUNG: Diese sollten manuell reviewt werden.
-            
-        """.trimIndent())
+        println(
+                """
+                Schreibe ${outputToBeReviewed}…
+                --------------------
+                $toBeReviewedBecauseChangedInOsmInTheMeantimeCount Straßenbäume wurden zwischenzeitlich in OSM editiert und
+                $toBeReviewedBecauseCloseToOtherTreeCount neue Straßenbäume sind jeweils zwischen $TREE_MERGE_DISTANCE und $SAFE_TREE_DISTANCE Metern von einem bereits gemappten Baum entfernt.
+                ACHTUNG: Diese sollten manuell reviewt werden.
+
+            """.trimIndent()
+        )
         writeOsm(toBeReviewedTrees, outputToBeReviewed)
     }
 }
 
-private fun loadKatasterTrees(file: File, importTimeStamp: String?): List<OsmNode> {
-    return parseKataster(BufferedInputStream(FileInputStream(file)), importTimeStamp)
+private fun loadKatasterTrees(file: File, dataTimeStamp: String): List<OsmNode> {
+    return parseKataster(BufferedInputStream(FileInputStream(file)), dataTimeStamp)
 }
 
 private fun retrieveOsmTreesInArea(areaId: Long): List<OsmNode> {
-    val overpassQuery = """
+    val overpassQuery =
+            """
         area(36000$areaId)->.searchArea;
         node["natural"="tree"](area.searchArea);
         out meta;
@@ -267,17 +226,36 @@ private fun retrieveOsmTreesInArea(areaId: Long): List<OsmNode> {
     return parseOsmNodes(BufferedInputStream(url.openStream()))
 }
 
+fun assignStableTreeIds(nodes: List<OsmNode>) {
+    // Group nodes by street key
+    val grouped = nodes.groupBy { it.tags["de:strassenschluessel"] ?: "" }
+    for ((streetKey, group) in grouped) {
+        if (streetKey.isEmpty()) continue
+        // Sort by species and then by coordinates for deterministic order
+        val sorted =
+                group.sortedWith(
+                        compareBy(
+                                { it.tags["species:de"] ?: "unknown" },
+                                { it.position.latitude },
+                                { it.position.longitude }
+                        )
+                )
+        for ((index, node) in sorted.withIndex()) {
+            val treeType = node.tags["species:de"] ?: "unknown"
+            val stableString = "${streetKey}_${treeType}_$index"
+            node.tags["ref:muenster:tree"] = stableString
+        }
+    }
+}
+
 private fun OsmNode.checkDateOrLastEditDate(): Instant =
-    tags["check_date"]?.toInstant()
-    ?: tags["survey:date"]?.toInstant()
-    ?: Instant.parse(timestamp)
+        tags["check_date"]?.toInstant()
+                ?: tags["survey:date"]?.toInstant() ?: Instant.parse(timestamp)
 
-private fun Map<String, String>.hasNoConflictsWith(other: Map<String,String>): Boolean =
-    all { (k, v) -> !other.containsKey(k) || other[k] == v }
+private fun Map<String, String>.hasNoConflictsWith(other: Map<String, String>): Boolean =
+        all { (k, v) ->
+            !other.containsKey(k) || other[k] == v
+        }
 
-
-private enum class Operator { BUKEA, HPA }
-
-private val OsmNode.katasterId: Pair<Operator, String>? get() =
-    tags["ref:bukea"]?.let { Pair(Operator.BUKEA, it) } ?:
-    tags["ref:hpa"]?.let { Pair(Operator.HPA, it) }
+private val OsmNode.katasterId: String?
+    get() = tags["ref:muenster:tree"]

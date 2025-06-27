@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
+
 plugins {
     kotlin("jvm") version "2.2.0"
     application
@@ -13,6 +15,9 @@ repositories {
 dependencies {
     implementation("org.locationtech.proj4j:proj4j:1.3.0")
     implementation("org.locationtech.proj4j:proj4j-epsg:1.3.0")
+
+    implementation("io.github.dellisd.spatialk:geojson:0.3.0")
+    implementation("io.github.dellisd.spatialk:turf:0.3.0")
 }
 
 kotlin {
